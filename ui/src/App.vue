@@ -7,6 +7,7 @@ import SettingsView from "./components/SettingsView.vue";
 import ClipIcon from "./components/ClipIcon.vue";
 import { formatSize, useUpdate } from "./update";
 import { hasModKey, modShortcut, shiftShortcut } from "./platform";
+import { clearSelection, reconcileSelection, keyboardSelectionFocus, hoverSelectionFocus, toggleSelection, rangeSelection } from "./selection";
 
 const page = ref<"list" | "settings">("list");
 const { newer: newerVersion } = useUpdate();
@@ -113,8 +114,8 @@ async function reload(keepScroll = false) {
     renderLimit.value = Math.max(RENDER_STEP, Math.ceil((restoreScroll + viewport) / MIN_ROW_HEIGHT) + RENDER_STEP);
   }
   clips.value = rows;
-  pruneMultiSelect();
   if (selected.value >= rows.length) selected.value = Math.max(0, rows.length - 1);
+  reconcileSelection(multiSelect, rows, rows[selected.value]);
   nextTick(() => {
     if (listEl.value) listEl.value.scrollTop = keepScroll ? prev : restoreScroll;
     listScrolled.value = (listEl.value?.scrollTop ?? 0) > 0;
@@ -134,11 +135,13 @@ function selectScope(s: Scope, groupId: number | null = null) {
 }
 
 watch([scope, activeGroup, kindFilter], () => {
+  clearSelection(multiSelect);
   selected.value = 0;
   reload();
 });
 // Debounced so a full-text LIKE scan doesn't run on every keystroke.
 watch(query, () => {
+  clearSelection(multiSelect);
   selected.value = 0;
   window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(reload, 180);
@@ -178,37 +181,16 @@ function flash(message: string) {
 }
 
 function clearMultiSelect() {
-  multiSelect.ids = [];
-  multiSelect.anchor = null;
-}
-
-function pruneMultiSelect() {
-  if (!multiSelect.ids.length) return;
-  const live = new Set(clips.value.map((row) => row.id));
-  multiSelect.ids = multiSelect.ids.filter((id) => live.has(id));
-  if (!multiSelect.ids.length) multiSelect.anchor = null;
+  clearSelection(multiSelect, clips.value[selected.value]);
 }
 
 function toggleMulti(index: number) {
-  const id = clips.value[index]?.id;
-  if (id == null) return;
-  const pos = multiSelect.ids.indexOf(id);
-  if (pos >= 0) multiSelect.ids.splice(pos, 1);
-  else multiSelect.ids.push(id);
-  multiSelect.anchor = index;
+  const row = clips.value[index];
+  if (row) toggleSelection(multiSelect, row);
 }
 
 function rangeMultiSelect(index: number) {
-  const anchor = multiSelect.anchor ?? selected.value;
-  const lo = Math.min(anchor, index);
-  const hi = Math.max(anchor, index);
-  const ids = new Set(multiSelect.ids);
-  for (let i = lo; i <= hi; i++) {
-    const id = clips.value[i]?.id;
-    if (id != null) ids.add(id);
-  }
-  multiSelect.ids = [...ids];
-  if (multiSelect.anchor == null) multiSelect.anchor = anchor;
+  rangeSelection(multiSelect, clips.value, index);
 }
 
 // A plain click still pastes immediately. Only modifier+click changes multi-select State.
@@ -718,6 +700,7 @@ async function moveTo(groupId: number | null) {
 function move(delta: number) {
   if (!clips.value.length) return;
   selected.value = Math.min(clips.value.length - 1, Math.max(0, selected.value + delta));
+  keyboardSelectionFocus(multiSelect, clips.value[selected.value]);
   nextTick(() => (listEl.value?.querySelector(`[data-clip-index="${selected.value}"]`) as HTMLElement | null)?.scrollIntoView({ block: "nearest" }));
 }
 
@@ -877,6 +860,7 @@ let lastPointer = { x: -1, y: -1 };
 function onItemHover(i: number, e: MouseEvent) {
   if (e.screenX === lastPointer.x && e.screenY === lastPointer.y) return;
   lastPointer = { x: e.screenX, y: e.screenY };
+  hoverSelectionFocus(multiSelect, clips.value[selected.value]);
   selected.value = i;
 }
 
@@ -901,6 +885,7 @@ function backToTop() {
   if (!listEl.value) return;
   listEl.value.scrollTop = 0;
   selected.value = 0;
+  keyboardSelectionFocus(multiSelect, clips.value[0]);
   listScrolled.value = false;
   window.clearTimeout(scrollTimer);
   saveUi({ scrollTop: 0 });
@@ -927,7 +912,7 @@ function onHidden() {
   moveFilter.value = "";
   notice.value = "";
   window.clearTimeout(noticeTimer);
-  clearMultiSelect();
+  clearSelection(multiSelect);
 }
 
 async function hideWindow() {
