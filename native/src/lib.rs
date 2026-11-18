@@ -384,13 +384,20 @@ fn copy_lan_code(core: State<Core>, address: String) -> CmdResult<()> {
 async fn send_clip_to_peer(app: AppHandle, id: i64, address: String) -> CmdResult<()> {
     tauri::async_runtime::spawn_blocking(move || {
         let core = app.state::<Core>();
-        let (kind, text) = db::get(&*core.conn()?, id)
+        let (kind, content) = db::get(&*core.conn()?, id)
             .map_err(to_err)?
             .ok_or("条目不存在")?;
-        if kind != db::KIND_TEXT {
-            return Err("仅支持传送文本".into());
+        match kind.as_str() {
+            db::KIND_TEXT => core.lan.send_text(&address, &content),
+            db::KIND_IMAGE => {
+                let png = core
+                    .images
+                    .png_bytes(&content)
+                    .map_err(|e| format!("读取图片失败：{e}"))?;
+                core.lan.send_image(&address, &png)
+            }
+            _ => Err("仅支持传送文本和图片".into()),
         }
-        core.lan.send_text(&address, &text)
     })
     .await
     .map_err(to_err)?
