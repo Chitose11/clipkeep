@@ -57,6 +57,13 @@ export interface StorageUsage {
   databaseBytes: number;
 }
 
+/** macOS Accessibility onboarding. `applies` is false on Windows. */
+export interface MacosSetupState {
+  applies: boolean;
+  trusted: boolean;
+  showGuide: boolean;
+}
+
 export interface LanPeer {
   name: string;
   address: string;
@@ -119,6 +126,10 @@ export const api = {
   downloadUpdate: () => invoke<void>("download_update"),
   cancelUpdate: () => invoke<void>("cancel_update"),
   installUpdate: () => invoke<void>("install_update"),
+  macosSetupState: () => invoke<MacosSetupState>("macos_setup_state"),
+  openAccessibilitySettings: () => invoke<void>("open_accessibility_settings"),
+  dismissAccessibilityGuide: () => invoke<void>("dismiss_accessibility_guide"),
+  setAccessibilityGuideHold: (hold: boolean) => invoke<void>("set_accessibility_guide_hold", { hold }),
 };
 
 export { getVersion };
