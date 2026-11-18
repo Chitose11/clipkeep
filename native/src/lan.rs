@@ -36,6 +36,8 @@ const MAX_IMAGE_CIPHER_BYTES: usize = MAX_IMAGE_BYTES + 16;
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 const TEXT_IO_TIMEOUT: Duration = Duration::from_secs(4);
 const IMAGE_IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// Image bodies are read in short slices so turning reception off does not wait out the full transfer budget.
+const IMAGE_READ_SLICE: Duration = Duration::from_millis(200);
 const CODE_PREFIX: &str = "cklan1://";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -483,7 +485,9 @@ fn receive_loop(listener: TcpListener, key: [u8; 32], app: AppHandle, stop: Arc<
                 }
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                if let Err(e) = receive_one(&mut stream, &key, &app) {
+                if let Err(e) = receive_one(&mut stream, &key, &app, &stop)
+                    && !stop.load(Ordering::SeqCst)
+                {
                     eprintln!("LAN receive rejected: {e}");
                 }
             }
@@ -604,8 +608,13 @@ fn read_text_frame(reader: &mut impl Read, key: &[u8; 32]) -> Result<String, Str
     }
 }
 
-fn receive_one(stream: &mut TcpStream, key: &[u8; 32], app: &AppHandle) -> Result<(), String> {
-    receive_incoming(stream, key, |incoming| {
+fn receive_one(
+    stream: &mut TcpStream,
+    key: &[u8; 32],
+    app: &AppHandle,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    receive_incoming(stream, key, Some(stop), |incoming| {
         let core = app.state::<Core>();
         match incoming {
             Incoming::Text(text) => core.save_text(&text, Some("局域网"))?,
@@ -620,18 +629,57 @@ fn receive_one(stream: &mut TcpStream, key: &[u8; 32], app: &AppHandle) -> Resul
     })
 }
 
+/// Reads an image body without sitting in one 30s `read`. `stop` is checked between slices, so
+/// `LanService::stop` — used when reception is turned off or the pairing code rotates — can join
+/// the worker instead of waiting out the whole transfer budget.
+fn read_image_body(
+    stream: &mut TcpStream,
+    len: usize,
+    stop: Option<&AtomicBool>,
+) -> Result<Vec<u8>, String> {
+    stream
+        .set_read_timeout(Some(IMAGE_READ_SLICE))
+        .map_err(|e| e.to_string())?;
+    let mut body = vec![0u8; len];
+    let mut filled = 0;
+    let deadline = std::time::Instant::now() + IMAGE_IO_TIMEOUT;
+    while filled < len {
+        if stop.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err("接收已关闭".into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("读取图片超时".into());
+        }
+        match stream.read(&mut body[filled..]) {
+            Ok(0) => return Err("连接已关闭".into()),
+            Ok(n) => filled += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(body)
+}
+
 fn receive_incoming(
     stream: &mut TcpStream,
     key: &[u8; 32],
+    stop: Option<&AtomicBool>,
     save: impl FnOnce(Incoming) -> Result<(), String>,
 ) -> Result<(), String> {
     let header = read_frame_header(stream)?;
-    if &header.magic == IMAGE_MAGIC {
-        stream
-            .set_read_timeout(Some(IMAGE_IO_TIMEOUT))
-            .map_err(|e| e.to_string())?;
-    }
-    let incoming = finish_frame(header, stream, key)?;
+    let incoming = if &header.magic == IMAGE_MAGIC {
+        let ciphertext = read_image_body(stream, header.len, stop)?;
+        let plain = open_frame(&header, &ciphertext, key)?;
+        decode_plain(&header, plain)?
+    } else {
+        finish_frame(header, stream, key)?
+    };
     save(incoming)?;
     stream
         .write_all(&make_ack(key)?)
@@ -645,7 +693,7 @@ fn receive_stream(
     key: &[u8; 32],
     save_text: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<(), String> {
-    receive_incoming(stream, key, |incoming| match incoming {
+    receive_incoming(stream, key, None, |incoming| match incoming {
         Incoming::Text(text) => save_text(&text),
         Incoming::Image(_) => Err("收到了图片帧".into()),
     })
@@ -948,7 +996,7 @@ mod tests {
             std::fs::create_dir(&dir).unwrap();
             let store = crate::images::ImageStore::new(&dir).unwrap();
             let conn = crate::db::open(std::path::Path::new(":memory:")).unwrap();
-            receive_incoming(&mut stream, &key, |incoming| {
+            receive_incoming(&mut stream, &key, None, |incoming| {
                 let Incoming::Image(bytes) = incoming else {
                     return Err("图片被当成了文本".into());
                 };
@@ -1018,5 +1066,38 @@ mod tests {
             "{err}"
         );
         receiver.join().unwrap();
+    }
+
+    #[test]
+    fn stopping_reception_interrupts_a_stalled_image_read() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let key = decode_key(&Config::fresh().receive_key).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let receiver = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let started = std::time::Instant::now();
+            let err = receive_incoming(&mut stream, &key, Some(&thread_stop), |_| {
+                Err("停掉的传输不应写入历史".into())
+            })
+            .unwrap_err();
+            (err, started.elapsed())
+        });
+        let mut sender = TcpStream::connect(address).unwrap();
+        sender
+            .write_all(&header_only(IMAGE_MAGIC, 64 * 1024))
+            .unwrap();
+        thread::sleep(Duration::from_millis(50));
+        stop.store(true, Ordering::SeqCst);
+        let (err, elapsed) = receiver.join().unwrap();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "stop waited {elapsed:?}: {err}"
+        );
+        assert!(err.contains("接收已关闭"), "{err}");
     }
 }
