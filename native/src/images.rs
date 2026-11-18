@@ -311,6 +311,18 @@ impl ImageStore {
         })
     }
 
+    /// Full-size original, when the file is present and not behind a reparse point.
+    pub fn original_path(&self, file: &str) -> Option<PathBuf> {
+        file_hash(file).and_then(|hash| {
+            let path = self.existing_path(&self.originals, hash);
+            (!is_reparse_point(&self.originals)
+                && !is_reparse_point(path.parent().unwrap_or(&self.originals))
+                && !is_reparse_point(&path)
+                && path.is_file())
+            .then_some(path)
+        })
+    }
+
     pub fn remove(&self, file: &str) {
         let Some(hash) = file_hash(file) else { return };
         let original = self.original_path(hash);

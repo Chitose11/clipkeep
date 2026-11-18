@@ -296,6 +296,10 @@ fn list_clips(
                 .images
                 .thumb_path(file)
                 .map(|path| path.to_string_lossy().into_owned());
+            clip.image = core
+                .images
+                .original_path(file)
+                .map(|path| path.to_string_lossy().into_owned());
         }
     }
     Ok(clips)
@@ -310,6 +314,37 @@ fn get_clip_text(core: State<Core>, id: i64) -> CmdResult<String> {
         return Err("只能预览文本条目".into());
     }
     Ok(text)
+}
+
+/// Offers a save-file dialog and writes the original PNG. `None` if the user cancelled.
+#[tauri::command]
+async fn save_clip_image(app: AppHandle, id: i64) -> CmdResult<Option<String>> {
+    let (file, default_name) = {
+        let core = app.state::<Core>();
+        let conn = core.conn()?;
+        let (kind, content) = db::get(&conn, id).map_err(to_err)?.ok_or("条目不存在")?;
+        if kind != db::KIND_IMAGE {
+            return Err("只能保存图片条目".into());
+        }
+        let source = db::source(&conn, id).ok().flatten();
+        (content, paste_file_name(source.as_deref()))
+    };
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("PNG 图片", &["png"])
+        .set_file_name(&default_name)
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(to_err)?;
+    let bytes = {
+        let core = app.state::<Core>();
+        core.images.png_bytes(&file).map_err(to_err)?
+    };
+    std::fs::write(&path, bytes).map_err(to_err)?;
+    Ok(Some(path.display().to_string()))
 }
 
 #[tauri::command]
@@ -2479,6 +2514,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_clips,
             get_clip_text,
+            save_clip_image,
             update_clip_text,
             get_capture_paused,
             toggle_capture_paused,

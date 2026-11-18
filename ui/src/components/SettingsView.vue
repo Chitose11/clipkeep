@@ -472,7 +472,7 @@ onUnmounted(() => {
           </select>
         </div>
         <p class="hint">
-          <kbd>↑</kbd><kbd>↓</kbd> 选择 · <kbd>Enter</kbd> 粘贴 · <kbd>{{ shiftShortcut("Enter") }}</kbd> 仅复制 · <kbd>{{ modShortcut("1–9") }}</kbd> 快速粘贴 ·
+          <kbd>↑</kbd><kbd>↓</kbd> 选择 · <kbd>Enter</kbd> 粘贴 · <kbd>{{ shiftShortcut("Enter") }}</kbd> 仅复制 · <kbd>空格</kbd> 预览 · <kbd>{{ modShortcut("1–9") }}</kbd> 快速粘贴 ·
           <kbd>{{ modShortcut("P") }}</kbd> 置顶 · <kbd>{{ modShortcut("S") }}</kbd> 收藏 · <kbd>{{ modShortcut("D") }}</kbd> 删除 · <kbd>Tab</kbd> 切分组 · <kbd>Esc</kbd> 关闭
         </p>
       </div>

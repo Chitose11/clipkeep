@@ -5,8 +5,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api, applyTheme, loadUi, saveUi, type Clip, type Group, type LanPeer, type Scope } from "./api";
 import SettingsView from "./components/SettingsView.vue";
 import ClipIcon from "./components/ClipIcon.vue";
-import { useUpdate } from "./update";
-import { modShortcut, shiftShortcut } from "./platform";
+import { formatSize, useUpdate } from "./update";
+import { hasModKey, modShortcut, shiftShortcut } from "./platform";
 
 const page = ref<"list" | "settings">("list");
 const { newer: newerVersion } = useUpdate();
@@ -73,6 +73,18 @@ const previewBusy = ref(false);
 const previewError = ref("");
 const editorEl = ref<HTMLTextAreaElement | null>(null);
 let previewGeneration = 0;
+// Multi-select is an interaction State (which rows are checked). It is distinct from
+// `selected` (the focused/current row) and from any Status. It is a prerequisite for a
+// later merge-paste feature; this change only implements the selection itself.
+const multiSelect = reactive({
+  ids: [] as number[],
+  anchor: null as number | null,
+});
+const inMultiSelect = computed(() => multiSelect.ids.length > 0);
+const previewImageSrc = computed(() => {
+  const clip = previewClip.value;
+  return clip?.kind === "image" && clip.image ? convertFileSrc(clip.image) : "";
+});
 let dragIndex = -1;
 let searchTimer: number | undefined;
 let scrollTimer: number | undefined;
@@ -94,6 +106,7 @@ async function reload(keepScroll = false) {
     renderLimit.value = Math.max(RENDER_STEP, Math.ceil((restoreScroll + viewport) / MIN_ROW_HEIGHT) + RENDER_STEP);
   }
   clips.value = rows;
+  pruneMultiSelect();
   if (selected.value >= rows.length) selected.value = Math.max(0, rows.length - 1);
   nextTick(() => {
     if (listEl.value) listEl.value.scrollTop = keepScroll ? prev : restoreScroll;
@@ -157,13 +170,68 @@ function flash(message: string) {
   noticeTimer = window.setTimeout(() => (notice.value = ""), 4500);
 }
 
+function clearMultiSelect() {
+  multiSelect.ids = [];
+  multiSelect.anchor = null;
+}
+
+function pruneMultiSelect() {
+  if (!multiSelect.ids.length) return;
+  const live = new Set(clips.value.map((row) => row.id));
+  multiSelect.ids = multiSelect.ids.filter((id) => live.has(id));
+  if (!multiSelect.ids.length) multiSelect.anchor = null;
+}
+
+function toggleMulti(index: number) {
+  const id = clips.value[index]?.id;
+  if (id == null) return;
+  const pos = multiSelect.ids.indexOf(id);
+  if (pos >= 0) multiSelect.ids.splice(pos, 1);
+  else multiSelect.ids.push(id);
+  multiSelect.anchor = index;
+}
+
+function rangeMultiSelect(index: number) {
+  const anchor = multiSelect.anchor ?? selected.value;
+  const lo = Math.min(anchor, index);
+  const hi = Math.max(anchor, index);
+  const ids = new Set(multiSelect.ids);
+  for (let i = lo; i <= hi; i++) {
+    const id = clips.value[i]?.id;
+    if (id != null) ids.add(id);
+  }
+  multiSelect.ids = [...ids];
+  if (multiSelect.anchor == null) multiSelect.anchor = anchor;
+}
+
+// A plain click still pastes immediately. Only modifier+click changes multi-select State.
+function onItemClick(c: Clip, index: number, e: MouseEvent) {
+  if (e.shiftKey) {
+    rangeMultiSelect(index);
+    selected.value = index;
+    return;
+  }
+  if (hasModKey(e)) {
+    toggleMulti(index);
+    selected.value = index;
+    return;
+  }
+  clearMultiSelect();
+  paste(c);
+}
+
 async function openPreview(c: Clip) {
-  if (c.kind !== "text") return;
   const generation = ++previewGeneration;
   previewClip.value = c;
   fullText.value = "";
+  draftText.value = "";
   previewError.value = "";
   editing.value = false;
+  if (c.kind === "image") {
+    previewBusy.value = false;
+    if (!c.image) previewError.value = "找不到原图文件";
+    return;
+  }
   previewBusy.value = true;
   try {
     const text = await api.getClipText(c.id);
@@ -175,6 +243,47 @@ async function openPreview(c: Clip) {
   } finally {
     if (generation === previewGeneration) previewBusy.value = false;
   }
+}
+
+function togglePreview() {
+  if (previewClip.value) {
+    if (!editing.value) closePreview();
+    return;
+  }
+  const current = clips.value[selected.value];
+  if (current) openPreview(current);
+}
+
+async function saveClipAsFile(c?: Clip) {
+  if (!c || c.kind !== "image" || previewBusy.value) return;
+  const generation = previewGeneration;
+  previewBusy.value = true;
+  previewError.value = "";
+  try {
+    const path = await api.saveClipImage(c.id);
+    if (generation !== previewGeneration && previewClip.value) return;
+    if (path) flash(`已保存到 ${path}`);
+  } catch (e) {
+    if (previewClip.value && generation === previewGeneration) previewError.value = String(e);
+    else flash(`保存失败：${e}`);
+  } finally {
+    if (generation === previewGeneration) previewBusy.value = false;
+  }
+}
+
+function previewSizeLabel(c: Clip) {
+  if (c.kind === "image") {
+    const dims = c.width && c.height ? `${c.width}×${c.height}` : "";
+    const size = c.size ? formatSize(c.size) : "";
+    return [dims, size].filter(Boolean).join(" · ");
+  }
+  return `${(editing.value ? draftText.value.length : fullText.value.length).toLocaleString()} 字符`;
+}
+
+function previewFootHint(c: Clip) {
+  if (c.kind === "image") return "空格关闭预览";
+  if (editing.value) return `${modShortcut("Enter")} 保存 · Esc 取消`;
+  return "可选择并复制任意段落 · 空格关闭";
 }
 
 function closePreview() {
@@ -578,12 +687,13 @@ function openClipMenu(c: Clip, e: MouseEvent) {
   nextTick(() => (document.querySelector(".clip-menu .menu-row") as HTMLButtonElement | null)?.focus());
 }
 
-function menuAction(action: "copy" | "preview" | "favorite" | "pin" | "delete") {
+function menuAction(action: "copy" | "preview" | "save" | "favorite" | "pin" | "delete") {
   const c = menuClip.value;
   closeMenus();
   if (!c) return;
   if (action === "copy") copyOnly(c);
   else if (action === "preview") openPreview(c);
+  else if (action === "save") saveClipAsFile(c);
   else if (action === "favorite") toggleFav(c);
   else if (action === "pin") togglePin(c);
   else remove(c);
@@ -616,6 +726,9 @@ function cycleTab(dir: number) {
 function onKey(e: KeyboardEvent) {
   if (previewClip.value) {
     if (e.key === "Escape") {
+      closePreview();
+      e.preventDefault();
+    } else if (e.key === " " && !editing.value) {
       closePreview();
       e.preventDefault();
     } else if (editing.value && (e.ctrlKey || e.metaKey) && e.key === "Enter") {
@@ -686,12 +799,23 @@ function onKey(e: KeyboardEvent) {
   const ctrl = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
   let handled = true;
-  if (e.key === "Escape") query.value ? (query.value = "") : hideWindow();
+  if (e.key === "Escape") {
+    if (inMultiSelect.value) clearMultiSelect();
+    else if (query.value) query.value = "";
+    else hideWindow();
+  }
   else if (e.key === "ArrowDown") move(1);
   else if (e.key === "ArrowUp") move(-1);
   else if (e.key === "PageDown") move(8);
   else if (e.key === "PageUp") move(-8);
   else if (e.key === "Enter") e.shiftKey ? copyOnly(current) : paste(current);
+  else if (e.key === " ") {
+    const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+    const inSearch = e.target === searchEl.value;
+    // Keep Space typable in search once a query has been started; an empty search still previews.
+    if (typing && !(inSearch && !query.value)) handled = false;
+    else togglePreview();
+  }
   else if (e.key === "Tab") {
     e.preventDefault();
     cycleTab(e.shiftKey ? -1 : 1);
@@ -759,6 +883,7 @@ function onHidden() {
   moveFilter.value = "";
   notice.value = "";
   window.clearTimeout(noticeTimer);
+  clearMultiSelect();
 }
 
 async function hideWindow() {
@@ -919,6 +1044,10 @@ onUnmounted(() => {
         <div v-if="preserveExplorerRename" class="notice-banner" role="status">资源管理器正在重命名 · 用鼠标选择记录，或再次按快捷键收起</div>
         <div v-else-if="notice" class="notice-banner" role="status">{{ notice }}</div>
         <div v-else-if="transferBusy" class="notice-banner" role="status">正在准备内容…</div>
+        <div v-if="inMultiSelect" class="multi-bar" role="status">
+          <span>已选择 {{ multiSelect.ids.length }} 项</span>
+          <button type="button" class="multi-bar-clear" @click="clearMultiSelect">取消选择</button>
+        </div>
       </div>
 
       <ul ref="listEl" class="list" @scroll="onScroll">
@@ -927,13 +1056,13 @@ onUnmounted(() => {
         <li
           v-for="(c, i) in visibleClips"
           :key="c.id"
-          v-memo="[c, i, i === selected, scope, groupName(c.groupId), preserveExplorerRename]"
+          v-memo="[c, i, i === selected, multiSelect.ids.includes(c.id), scope, groupName(c.groupId), preserveExplorerRename]"
           class="item"
-          :class="{ selected: i === selected, pinned: c.pinned }"
+          :class="{ selected: i === selected, pinned: c.pinned, picked: multiSelect.ids.includes(c.id) }"
           :title="itemHint(c, i)"
           @mousemove="onItemHover(i, $event)"
           @click.capture="dismissMenuBeforeItemClick"
-          @click="paste(c)"
+          @click="onItemClick(c, i, $event)"
           @contextmenu="openClipMenu(c, $event)"
         >
           <div class="body" :class="{ 'image-body': c.kind === 'image' && c.thumb }">
@@ -956,7 +1085,7 @@ onUnmounted(() => {
                 <span v-if="scope !== 'group' && groupName(c.groupId)" class="meta-flag group-flag" :title="groupName(c.groupId) ?? ''"><ClipIcon name="folder" class="tiny" /><span class="group-label">{{ groupName(c.groupId) }}</span></span>
               </div>
               <div class="ops">
-                <button v-if="c.kind === 'text'" class="icon-btn sm" title="查看全文 / 编辑" @click.stop="openPreview(c)"><ClipIcon name="eye" /></button>
+                <button class="icon-btn sm" :title="c.kind === 'image' ? '预览图片 (空格)' : '查看全文 / 编辑 (空格)'" @click.stop="openPreview(c)"><ClipIcon name="eye" /></button>
                 <button
                   class="icon-btn sm star-op"
                   :class="{ active: c.favorite }"
@@ -1014,7 +1143,8 @@ onUnmounted(() => {
 
     <div v-if="clipMenu.open && menuClip" class="menu menu-surface clip-menu" :style="{ left: clipMenu.x + 'px', top: clipMenu.y + 'px' }" @click.stop @mouseover="onClipMenuHover">
       <button class="menu-row" @click="menuAction('copy')"><ClipIcon name="copy" /><span class="menu-text">仅复制</span><span class="menu-shortcut">{{ shiftShortcut('Enter') }}</span></button>
-      <button v-if="menuClip.kind === 'text'" class="menu-row" @click="menuAction('preview')"><ClipIcon name="eye" /><span class="menu-text">查看 / 编辑</span></button>
+      <button class="menu-row" @click="menuAction('preview')"><ClipIcon name="eye" /><span class="menu-text">{{ menuClip.kind === 'image' ? '预览' : '查看 / 编辑' }}</span><span class="menu-shortcut">空格</span></button>
+      <button v-if="menuClip.kind === 'image'" class="menu-row" @click="menuAction('save')"><ClipIcon name="download" /><span class="menu-text">另存为文件</span></button>
       <div class="menu-divider"></div>
       <button v-if="menuClip.kind === 'text'" class="menu-row" :class="{ open: openSubmenu === 'send' }" data-submenu="send" aria-haspopup="menu" :aria-expanded="openSubmenu === 'send'" @click="showSubmenu('send', $event.currentTarget as HTMLElement, true)"><ClipIcon name="send" /><span class="menu-text">发送到设备</span><ClipIcon name="chevron" class="menu-chevron" /></button>
       <button class="menu-row" :class="{ open: openSubmenu === 'move' }" data-submenu="move" aria-haspopup="menu" :aria-expanded="openSubmenu === 'move'" @click="showSubmenu('move', $event.currentTarget as HTMLElement, true)"><ClipIcon name="folder" /><span class="menu-text">移动到分组</span><ClipIcon name="chevron" class="menu-chevron" /></button>
@@ -1077,20 +1207,29 @@ onUnmounted(() => {
       </div>
     </form>
 
-    <section v-if="previewClip" class="preview-panel" aria-label="文本全文预览">
+    <section v-if="previewClip" class="preview-panel" :aria-label="previewClip.kind === 'image' ? '图片预览' : '文本全文预览'">
       <header class="preview-head">
         <button class="icon-btn" title="返回 (Esc)" @click="closePreview"><ClipIcon name="back" /></button>
-        <div class="preview-title"><ClipIcon :name="editing ? 'edit' : 'file-text'" />{{ editing ? '编辑文本' : '文本全文' }}</div>
-        <span class="preview-size">{{ (editing ? draftText.length : fullText.length).toLocaleString() }} 字符</span>
+        <div class="preview-title">
+          <ClipIcon :name="previewClip.kind === 'image' ? 'image' : editing ? 'edit' : 'file-text'" />
+          {{ previewClip.kind === 'image' ? (previewClip.source || '图片预览') : editing ? '编辑文本' : '文本全文' }}
+        </div>
+        <span class="preview-size">{{ previewSizeLabel(previewClip) }}</span>
         <button class="icon-btn" :title="editing ? '取消编辑' : '关闭'" @click="closePreview"><ClipIcon name="close" /></button>
       </header>
       <div v-if="previewError" class="preview-error">{{ previewError }}</div>
-      <div v-if="previewBusy && !fullText" class="preview-loading">正在读取全文…</div>
-      <textarea v-else-if="editing" ref="editorEl" v-model="draftText" class="preview-editor" spellcheck="false"></textarea>
-      <pre v-else class="preview-content">{{ fullText }}</pre>
+      <div v-if="previewClip.kind === 'image'" class="preview-image-wrap">
+        <img v-if="previewImageSrc && !previewError" class="preview-image" :src="previewImageSrc" :alt="previewClip.source || '剪贴板图片'" draggable="false" />
+      </div>
+      <template v-else>
+        <div v-if="previewBusy && !fullText" class="preview-loading">正在读取全文…</div>
+        <textarea v-else-if="editing" ref="editorEl" v-model="draftText" class="preview-editor" spellcheck="false"></textarea>
+        <pre v-else class="preview-content">{{ fullText }}</pre>
+      </template>
       <footer class="preview-foot">
-        <span>{{ editing ? `${modShortcut('Enter')} 保存 · Esc 取消` : '可选择并复制任意段落' }}</span>
-        <button v-if="editing" class="preview-action" :disabled="previewBusy" @click="savePreview">保存</button>
+        <span>{{ previewFootHint(previewClip) }}</span>
+        <button v-if="previewClip.kind === 'image'" class="preview-action" :disabled="previewBusy || !!previewError" @click="saveClipAsFile(previewClip)">另存为</button>
+        <button v-else-if="editing" class="preview-action" :disabled="previewBusy" @click="savePreview">保存</button>
         <button v-else class="preview-action" :disabled="previewBusy || !!previewError" @click="startEditing">编辑</button>
       </footer>
     </section>
@@ -1238,6 +1377,26 @@ onUnmounted(() => {
 }
 .pause-banner svg { width: 12px; height: 12px; }
 .notice-banner { background: var(--surface-2); color: var(--text-2); }
+.multi-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.multi-bar span { flex: 1; }
+.multi-bar-clear {
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  color: var(--accent);
+  font-weight: 600;
+}
+.multi-bar-clear:hover { background: var(--surface); }
 
 .list {
   flex: 1;
@@ -1292,6 +1451,23 @@ onUnmounted(() => {
   background: var(--selected);
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent-soft);
+}
+.item.picked {
+  background: var(--accent-soft);
+}
+.item.picked.selected {
+  background: var(--selected);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.item.picked::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 .item::before {
   content: "";
@@ -1589,4 +1765,24 @@ onUnmounted(() => {
   font-size: var(--fs-sm);
 }
 .preview-loading { color: var(--muted); }
+.preview-image-wrap {
+  flex: 1;
+  min-height: 0;
+  margin: 10px;
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: repeating-conic-gradient(var(--hover) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px;
+}
+.preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--r-sm);
+}
 </style>

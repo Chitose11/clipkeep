@@ -40,6 +40,8 @@ pub struct Clip {
     #[serde(skip)]
     pub file: Option<String>,
     pub thumb: Option<String>,
+    /// Absolute path of the original PNG, filled in by `list_clips`.
+    pub image: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -391,6 +393,7 @@ pub fn list(conn: &Connection, scope: Scope, query: &str) -> rusqlite::Result<Ve
             source: r.get(10)?,
             group_id: r.get(11)?,
             thumb: None,
+            image: None,
         })
     };
     let rows = if query.is_empty() {
