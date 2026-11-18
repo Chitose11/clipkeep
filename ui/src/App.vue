@@ -2,8 +2,9 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { api, applyTheme, loadUi, saveUi, type Clip, type Group, type LanPeer, type Scope } from "./api";
+import { api, applyTheme, loadUi, saveUi, type Clip, type Group, type LanPeer, type MacosSetupState, type Scope } from "./api";
 import SettingsView from "./components/SettingsView.vue";
+import AccessibilityGuide from "./components/AccessibilityGuide.vue";
 import ClipIcon from "./components/ClipIcon.vue";
 import { useUpdate } from "./update";
 
@@ -60,6 +61,15 @@ const sendError = ref("");
 const sendLoadError = ref(false);
 const paused = ref(false);
 const notice = ref("");
+const accessibilityGuide = ref(false);
+const accessibilityMode = ref<"first-run" | "recovery">("first-run");
+const accessibilityTrusted = ref(false);
+const accessibilityHint = ref("");
+const accessibilityBusy = ref(false);
+let accessibilityTimer: number | undefined;
+let accessibilitySync = 0;
+let accessibilityHold = 0;
+let accessibilityHoldOpen = false;
 const transferBusy = ref(false);
 let transferGeneration = 0;
 let pendingFocusError = "";
@@ -138,7 +148,8 @@ async function transfer(c: Clip | undefined, paste: boolean) {
     if (paste) await api.pasteClip(c.id);
     else await api.copyClip(c.id);
   } catch (error) {
-    if (generation === transferGeneration) reportFocusError(error);
+    const explained = paste && (await explainAccessibilityIfNeeded());
+    if (!explained && generation === transferGeneration) reportFocusError(error);
   } finally {
     if (generation === transferGeneration) transferBusy.value = false;
   }
@@ -613,6 +624,11 @@ function cycleTab(dir: number) {
 }
 
 function onKey(e: KeyboardEvent) {
+  if (accessibilityGuide.value) {
+    // Esc hides the panel. Leaving it open keeps the steps on screen until an explicit choice.
+    if (e.key === "Escape") e.preventDefault();
+    return;
+  }
   if (previewClip.value) {
     if (e.key === "Escape") {
       closePreview();
@@ -812,7 +828,12 @@ async function onShown(renameSafeMode?: boolean) {
   // The reload below covers a search cleared on hide whose debounced reload is still pending.
   window.clearTimeout(searchTimer);
   // Restore keyboard control before the database refresh finishes.
-  if (!preserveRename) nextTick(() => searchEl.value?.focus());
+  // The accessibility guide has its own focus; typing must not land in the search box under it.
+  if (!preserveRename && !accessibilityGuide.value) {
+    nextTick(() => {
+      if (!accessibilityGuide.value) searchEl.value?.focus();
+    });
+  }
   const ui = loadUi();
   restoreScroll = ui.scrollTop;
   selected.value = 0;
@@ -827,7 +848,143 @@ async function onShown(renameSafeMode?: boolean) {
   }
   const [, , isPaused] = await Promise.all([reloadGroups(), reload(), api.getCapturePaused()]);
   paused.value = isPaused;
+  void syncAccessibility();
 }
+
+function applyAccessibilityState(state: MacosSetupState) {
+  if (!state.applies) {
+    accessibilityGuide.value = false;
+    return;
+  }
+  if (state.trusted) {
+    if (accessibilityGuide.value) {
+      accessibilityTrusted.value = true;
+      accessibilityHint.value = "";
+    }
+    return;
+  }
+  accessibilityTrusted.value = false;
+  if (state.showGuide) openAccessibilityGuide("first-run");
+}
+
+async function syncAccessibility(attempt = 0) {
+  const generation = attempt === 0 ? ++accessibilitySync : accessibilitySync;
+  try {
+    const state = await api.macosSetupState();
+    if (generation !== accessibilitySync) return;
+    applyAccessibilityState(state);
+  } catch {
+    // The window can load before the backend finishes starting.
+    if (generation !== accessibilitySync || attempt >= 8) return;
+    window.setTimeout(() => { void syncAccessibility(attempt + 1); }, 300);
+  }
+}
+
+function pushAccessibilityHold(hold: boolean) {
+  accessibilityHoldOpen = hold;
+  const generation = ++accessibilityHold;
+  // An earlier request can land after a newer one. Re-apply the latest choice when that happens.
+  void api.setAccessibilityGuideHold(hold).finally(() => {
+    if (generation !== accessibilityHold) void api.setAccessibilityGuideHold(accessibilityHoldOpen);
+  });
+}
+
+function openAccessibilityGuide(mode: "first-run" | "recovery") {
+  accessibilityMode.value = mode;
+  if (!accessibilityGuide.value) {
+    accessibilityTrusted.value = false;
+    accessibilityHint.value = "";
+  }
+  accessibilityGuide.value = true;
+  searchEl.value?.blur();
+  pushAccessibilityHold(true);
+}
+
+async function explainAccessibilityIfNeeded() {
+  try {
+    const state = await api.macosSetupState();
+    if (!state.applies || state.trusted) return false;
+    openAccessibilityGuide("recovery");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function recheckAccessibility() {
+  if (!accessibilityGuide.value || accessibilityTrusted.value) return;
+  try {
+    const state = await api.macosSetupState();
+    if (state.applies && state.trusted && accessibilityGuide.value) {
+      accessibilityTrusted.value = true;
+      accessibilityHint.value = "";
+    }
+  } catch {
+    // The next poll, or 「我已授权」, retries the check.
+  }
+}
+
+async function confirmAccessibility() {
+  accessibilityBusy.value = true;
+  try {
+    const state = await api.macosSetupState();
+    if (state.trusted) {
+      accessibilityTrusted.value = true;
+      accessibilityHint.value = "";
+      return;
+    }
+    accessibilityHint.value = "还没有检测到授权。请确认「系统设置 → 隐私与安全性 → 辅助功能」里的 clipkeep 开关已经打开，然后回到这里再点一次。";
+  } catch (error) {
+    accessibilityHint.value = `暂时无法检查授权：${error}`;
+  } finally {
+    accessibilityBusy.value = false;
+  }
+}
+
+async function openAccessibilitySettings() {
+  try {
+    await api.openAccessibilitySettings();
+  } catch (error) {
+    accessibilityHint.value = `无法打开系统设置：${error}`;
+  }
+}
+
+async function dismissAccessibility() {
+  accessibilityBusy.value = true;
+  accessibilityHoldOpen = false;
+  accessibilityHold++;
+  try {
+    await api.dismissAccessibilityGuide();
+    accessibilityGuide.value = false;
+    accessibilityTrusted.value = false;
+    accessibilityHint.value = "";
+  } catch (error) {
+    accessibilityHoldOpen = true;
+    pushAccessibilityHold(true);
+    accessibilityHint.value = `没能记住这个选择：${error}`;
+  } finally {
+    accessibilityBusy.value = false;
+  }
+}
+
+async function finishAccessibility() {
+  accessibilityGuide.value = false;
+  accessibilityTrusted.value = false;
+  accessibilityHint.value = "";
+  accessibilityHoldOpen = false;
+  accessibilityHold++;
+  try {
+    await api.setAccessibilityGuideHold(false);
+  } catch {
+    // Blur can hide the panel again once the guide is gone.
+  }
+}
+
+watch(accessibilityGuide, (open) => {
+  window.clearInterval(accessibilityTimer);
+  if (!open) return;
+  accessibilityTimer = window.setInterval(() => { void recheckAccessibility(); }, 1000);
+});
 
 function preventNativeContextMenu(event: MouseEvent) {
   event.preventDefault();
@@ -870,13 +1027,14 @@ onUnmounted(() => {
   window.clearTimeout(noticeTimer);
   window.clearTimeout(searchTimer);
   window.clearTimeout(scrollTimer);
+  window.clearInterval(accessibilityTimer);
   unlisteners.forEach((u) => u());
 });
 </script>
 
 <template>
   <div class="shell">
-    <SettingsView v-if="page === 'settings'" :focus-about="focusAbout" @back="backToList" />
+    <SettingsView v-if="page === 'settings'" :focus-about="focusAbout" @back="backToList" @show-accessibility-guide="openAccessibilityGuide('first-run')" />
 
     <template v-else>
       <header class="topbar" @mousedown.self.left="startWindowDrag">
@@ -1075,6 +1233,18 @@ onUnmounted(() => {
         <button type="submit" class="group-submit" :disabled="groupEditor.busy">{{ groupEditor.mode === 'create' ? '创建' : '保存' }}</button>
       </div>
     </form>
+
+    <AccessibilityGuide
+      v-if="accessibilityGuide"
+      :mode="accessibilityMode"
+      :trusted="accessibilityTrusted"
+      :hint="accessibilityHint"
+      :busy="accessibilityBusy"
+      @open-settings="openAccessibilitySettings"
+      @confirm="confirmAccessibility"
+      @dismiss="dismissAccessibility"
+      @finish="finishAccessibility"
+    />
 
     <section v-if="previewClip" class="preview-panel" aria-label="文本全文预览">
       <header class="preview-head">
