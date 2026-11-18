@@ -109,14 +109,6 @@ impl KindFilter {
     }
 }
 
-/// A complete hex colour stored as the whole text (`#RGB` / `#RGBA` / `#RRGGBB` / `#RRGGBBAA`).
-const IS_HEX_COLOR: &str = "(kind = 'text' AND (
-    trim(content) GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
-    OR trim(content) GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
-    OR trim(content) GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
-    OR trim(content) GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
-))";
-
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -372,6 +364,18 @@ pub fn list_with_kind(
     query: &str,
     kind: KindFilter,
 ) -> rusqlite::Result<Vec<Clip>> {
+    // Use the same Rust parser for SQL filtering and display; SQLite trim() only removes
+    // ASCII spaces. Register on this connection too (tests/import callers may use in-memory DBs).
+    conn.create_scalar_function(
+        "clipkeep_hex_color",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let text: String = ctx.get(0)?;
+            Ok(hex_color(&text))
+        },
+    )?;
     let mut filters: Vec<String> = Vec::new();
     match scope {
         Scope::All => {}
@@ -380,9 +384,13 @@ pub fn list_with_kind(
     }
     match kind {
         KindFilter::All => {}
-        KindFilter::Text => filters.push(format!("kind = 'text' AND NOT {IS_HEX_COLOR}")),
+        KindFilter::Text => {
+            filters.push("kind = 'text' AND clipkeep_hex_color(content) IS NULL".into())
+        }
         KindFilter::Image => filters.push("kind = 'image'".into()),
-        KindFilter::Color => filters.push(IS_HEX_COLOR.into()),
+        KindFilter::Color => {
+            filters.push("kind = 'text' AND clipkeep_hex_color(content) IS NOT NULL".into())
+        }
     }
     if !query.is_empty() {
         // Image rows store the file name in `content` and the original name in `source`.
@@ -399,7 +407,8 @@ pub fn list_with_kind(
     };
     let sql = format!(
         "SELECT id, kind, CASE WHEN kind = 'image' THEN content ELSE COALESCE(preview, '') END,
-                size, length(CAST(preview AS BLOB)) < size, width, height, favorite, pinned, updated_at, source, group_id
+                size, length(CAST(preview AS BLOB)) < size, width, height, favorite, pinned, updated_at, source, group_id,
+                CASE WHEN kind = 'text' THEN clipkeep_hex_color(content) END
          FROM clips {where_clause} {ORDER} LIMIT {LIST_LIMIT}"
     );
     let pattern = format!(
@@ -415,12 +424,7 @@ pub fn list_with_kind(
         let body: String = r.get(2)?;
         let is_image = kind == KIND_IMAGE;
         let truncated = !is_image && r.get::<_, Option<bool>>(4)?.unwrap_or(false);
-        // A colour is a few characters, so a complete preview is the whole text.
-        let color = if is_image || truncated {
-            None
-        } else {
-            hex_color(&body)
-        };
+        let color: Option<String> = r.get(12)?;
         Ok(Clip {
             id: r.get(0)?,
             preview: if is_image {
@@ -836,7 +840,8 @@ mod tests {
         assert_eq!(color.color.as_deref(), Some("#2563EB"));
         assert_eq!(color.preview, original);
         assert_eq!(get(&conn, id).unwrap().unwrap().1, original);
-        assert_eq!(clips.iter().filter(|c| c.color.is_some()).count(), 1);
+        // A whitespace-padded color is recognized from full content even beyond the preview.
+        assert_eq!(clips.iter().filter(|c| c.color.is_some()).count(), 2);
     }
 
     #[test]
@@ -1177,5 +1182,41 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn color_filter_and_display_share_unicode_whitespace_rules() {
+        let conn = mem();
+        // Exercise every Unicode scalar that the production parser considers whitespace,
+        // rather than duplicating an incomplete hand-written whitespace table in SQL/tests.
+        let whitespace: String = (0..=0x10ffff)
+            .filter_map(char::from_u32)
+            .filter(|c| c.is_whitespace())
+            .collect();
+        for text in [
+            "\n#fff\n".to_owned(),
+            "\t#AbCd\r\n".to_owned(),
+            "\u{3000}#2563eb\u{a0}".to_owned(),
+            format!("{whitespace}#12345678{whitespace}"),
+            // Recognition must not depend on the list's preview/truncation boundary either.
+            format!("{}#abc", " ".repeat(PREVIEW_CHARS + 1)),
+            "not a color #fff".to_owned(),
+            "#12x".to_owned(),
+            "#fff #000".to_owned(),
+        ] {
+            add(&conn, &text, text.len() as i64);
+        }
+        let all = list(&conn, Scope::All, "").unwrap();
+        let colors = list_with_kind(&conn, Scope::All, "", KindFilter::Color).unwrap();
+        let texts = list_with_kind(&conn, Scope::All, "", KindFilter::Text).unwrap();
+        assert_eq!(colors.len(), 5);
+        assert_eq!(texts.len(), 3);
+        for row in all {
+            let full = get(&conn, row.id).unwrap().unwrap().1;
+            let expected = hex_color(&full);
+            assert_eq!(row.color, expected);
+            assert_eq!(colors.iter().any(|c| c.id == row.id), expected.is_some());
+            assert_eq!(texts.iter().any(|c| c.id == row.id), expected.is_none());
+        }
     }
 }
