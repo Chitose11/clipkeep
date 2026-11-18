@@ -304,7 +304,7 @@ fn list_clips(
                 .map(|path| path.to_string_lossy().into_owned());
             clip.image = core
                 .images
-                .original_path(file)
+                .original_file_path(file)
                 .map(|path| path.to_string_lossy().into_owned());
         }
     }
