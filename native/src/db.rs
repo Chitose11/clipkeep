@@ -89,6 +89,34 @@ pub enum Scope {
     Group(i64),
 }
 
+/// Type filter for the panel list. This is not automatic grouping of related clips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KindFilter {
+    All,
+    Text,
+    Image,
+    Color,
+}
+
+impl KindFilter {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "text" => Self::Text,
+            "image" => Self::Image,
+            "color" => Self::Color,
+            _ => Self::All,
+        }
+    }
+}
+
+/// A complete hex colour stored as the whole text (`#RGB` / `#RGBA` / `#RRGGBB` / `#RRGGBBAA`).
+const IS_HEX_COLOR: &str = "(kind = 'text' AND (
+    trim(content) GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+    OR trim(content) GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+    OR trim(content) GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+    OR trim(content) GLOB '#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]'
+))";
+
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -335,15 +363,35 @@ fn delete_where(
 }
 
 pub fn list(conn: &Connection, scope: Scope, query: &str) -> rusqlite::Result<Vec<Clip>> {
+    list_with_kind(conn, scope, query, KindFilter::All)
+}
+
+pub fn list_with_kind(
+    conn: &Connection,
+    scope: Scope,
+    query: &str,
+    kind: KindFilter,
+) -> rusqlite::Result<Vec<Clip>> {
     let mut filters: Vec<String> = Vec::new();
     match scope {
         Scope::All => {}
         Scope::Favorites => filters.push("favorite = 1".into()),
         Scope::Group(id) => filters.push(format!("group_id = {id}")),
     }
-    if !query.is_empty() {
-        filters.push("(kind = 'text' AND content LIKE ?1 ESCAPE '\\')".into());
+    match kind {
+        KindFilter::All => {}
+        KindFilter::Text => filters.push(format!("kind = 'text' AND NOT {IS_HEX_COLOR}")),
+        KindFilter::Image => filters.push("kind = 'image'".into()),
+        KindFilter::Color => filters.push(IS_HEX_COLOR.into()),
     }
+    if !query.is_empty() {
+        // Image rows store the file name in `content` and the original name in `source`.
+        filters.push(
+            "( (kind = 'text' AND content LIKE ?1 ESCAPE '\\') OR (kind = 'image' AND (content LIKE ?1 ESCAPE '\\' OR IFNULL(source, '') LIKE ?1 ESCAPE '\\')) )"
+                .into(),
+        );
+    }
+
     let where_clause = if filters.is_empty() {
         String::new()
     } else {
@@ -1064,5 +1112,70 @@ mod tests {
             })
             .unwrap();
         assert_eq!((count, fav), (1, 1));
+    }
+
+    fn add_image(conn: &Connection, file: &str, source: Option<&str>) -> i64 {
+        upsert(
+            conn,
+            &NewClip {
+                kind: KIND_IMAGE,
+                content: file,
+                hash: file,
+                width: Some(10),
+                height: Some(8),
+                size: 12,
+                source,
+            },
+            0,
+        )
+        .unwrap();
+        conn.query_row("SELECT id FROM clips WHERE hash = ?1", [file], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn search_matches_text_and_image_filenames() {
+        let conn = mem();
+        add(&conn, "hello screenshot", 16);
+        add_image(&conn, "abc123.png", Some("holiday-screenshot.png"));
+        add_image(&conn, "def456.png", Some("notes.jpg"));
+        let hits = list(&conn, Scope::All, "screenshot").unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().any(|c| c.kind == KIND_TEXT));
+        assert!(
+            hits.iter()
+                .any(|c| c.source.as_deref() == Some("holiday-screenshot.png"))
+        );
+        let by_stored = list(&conn, Scope::All, "def456").unwrap();
+        assert_eq!(by_stored.len(), 1);
+        assert_eq!(by_stored[0].kind, KIND_IMAGE);
+    }
+
+    #[test]
+    fn list_filters_by_kind() {
+        let conn = mem();
+        add(&conn, "plain", 5);
+        add(&conn, "#2563eb", 7);
+        add_image(&conn, "pic.png", Some("pic.png"));
+        let texts = list_with_kind(&conn, Scope::All, "", KindFilter::Text).unwrap();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].preview, "plain");
+        let colors = list_with_kind(&conn, Scope::All, "", KindFilter::Color).unwrap();
+        assert_eq!(colors.len(), 1);
+        assert_eq!(colors[0].color.as_deref(), Some("#2563eb"));
+        let images = list_with_kind(&conn, Scope::All, "", KindFilter::Image).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].kind, KIND_IMAGE);
+        assert_eq!(
+            list_with_kind(&conn, Scope::All, "pic", KindFilter::Image)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            list_with_kind(&conn, Scope::All, "pic", KindFilter::Text)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -70,9 +70,11 @@ export interface LanState {
 
 export type Scope = "all" | "fav" | "group";
 
+export type KindFilter = "all" | "text" | "image" | "color";
+
 export const api = {
-  listClips: (scope: Scope, groupId: number | null, query: string) =>
-    invoke<Clip[]>("list_clips", { scope, groupId, query }),
+  listClips: (scope: Scope, groupId: number | null, query: string, kind: KindFilter = "all") =>
+    invoke<Clip[]>("list_clips", { scope, groupId, query, kind }),
   getClipText: (id: number) => invoke<string>("get_clip_text", { id }),
   saveClipImage: (id: number) => invoke<string | null>("save_clip_image", { id }),
   updateClipText: (id: number, text: string) => invoke<void>("update_clip_text", { id, text }),

@@ -41,7 +41,7 @@ mod win;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use clipboard::Captured;
-use db::{Group, NewClip, RawClip, Scope};
+use db::{Group, KindFilter, NewClip, RawClip, Scope};
 use images::ImageStore;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -287,9 +287,15 @@ fn list_clips(
     scope: String,
     group_id: Option<i64>,
     query: String,
+    kind: Option<String>,
 ) -> CmdResult<Vec<db::Clip>> {
-    let mut clips =
-        db::list(&*core.conn()?, scope_of(&scope, group_id), query.trim()).map_err(to_err)?;
+    let mut clips = db::list_with_kind(
+        &*core.conn()?,
+        scope_of(&scope, group_id),
+        query.trim(),
+        KindFilter::parse(kind.as_deref().unwrap_or("all")),
+    )
+    .map_err(to_err)?;
     for clip in &mut clips {
         if let Some(file) = &clip.file {
             clip.thumb = core

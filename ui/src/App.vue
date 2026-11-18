@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { api, applyTheme, loadUi, saveUi, type Clip, type Group, type LanPeer, type Scope } from "./api";
+import { api, applyTheme, loadUi, saveUi, type Clip, type Group, type KindFilter, type LanPeer, type Scope } from "./api";
 import SettingsView from "./components/SettingsView.vue";
 import ClipIcon from "./components/ClipIcon.vue";
 import { formatSize, useUpdate } from "./update";
@@ -15,6 +15,13 @@ const focusAbout = ref(false);
 const scope = ref<Scope>("all");
 const activeGroup = ref<number | null>(null);
 const query = ref("");
+const kindFilter = ref<KindFilter>("all");
+const kindOptions: { id: KindFilter; label: string }[] = [
+  { id: "all", label: "全部" },
+  { id: "text", label: "文本" },
+  { id: "image", label: "图片" },
+  { id: "color", label: "色值" },
+];
 const clips = ref<Clip[]>([]);
 // Rows are rendered in steps: all 1000 cost the renderer ~40MB while a screenful is visible.
 const RENDER_STEP = 100;
@@ -97,7 +104,7 @@ let loadSeq = 0;
 async function reload(keepScroll = false) {
   const seq = ++loadSeq;
   const prev = keepScroll ? (listEl.value?.scrollTop ?? 0) : 0;
-  const rows = await api.listClips(scope.value, activeGroup.value, query.value);
+  const rows = await api.listClips(scope.value, activeGroup.value, query.value, kindFilter.value);
   if (seq !== loadSeq) return;
   // A refresh keeps the rows already rendered; a fresh load renders enough to reach the
   // remembered scroll position.
@@ -126,7 +133,7 @@ function selectScope(s: Scope, groupId: number | null = null) {
   saveUi({ scope: s, groupId });
 }
 
-watch([scope, activeGroup], () => {
+watch([scope, activeGroup, kindFilter], () => {
   selected.value = 0;
   reload();
 });
@@ -711,8 +718,44 @@ async function moveTo(groupId: number | null) {
 function move(delta: number) {
   if (!clips.value.length) return;
   selected.value = Math.min(clips.value.length - 1, Math.max(0, selected.value + delta));
-  nextTick(() => listEl.value?.children[selected.value]?.scrollIntoView({ block: "nearest" }));
+  nextTick(() => (listEl.value?.querySelector(`[data-clip-index="${selected.value}"]`) as HTMLElement | null)?.scrollIntoView({ block: "nearest" }));
 }
+
+type DateBucket = "pinned" | "today" | "yesterday" | "earlier";
+const BUCKET_LABEL: Record<DateBucket, string> = {
+  pinned: "置顶",
+  today: "今天",
+  yesterday: "昨天",
+  earlier: "更早",
+};
+
+function dateBucket(ms: number): "today" | "yesterday" | "earlier" {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const today = start.getTime();
+  if (ms >= today) return "today";
+  if (ms >= today - 86_400_000) return "yesterday";
+  return "earlier";
+}
+
+type ListRow =
+  | { key: string; kind: "heading"; label: string }
+  | { key: string; kind: "clip"; clip: Clip; index: number };
+
+// Date segmentation only (plus an existing-order 置顶 heading). Not auto-grouping of related clips.
+const listRows = computed<ListRow[]>(() => {
+  const rows: ListRow[] = [];
+  let last: DateBucket | null = null;
+  visibleClips.value.forEach((clip, index) => {
+    const bucket: DateBucket = clip.pinned ? "pinned" : dateBucket(clip.updatedAt);
+    if (bucket !== last) {
+      rows.push({ key: `h-${bucket}-${index}`, kind: "heading", label: BUCKET_LABEL[bucket] });
+      last = bucket;
+    }
+    rows.push({ key: `c-${clip.id}`, kind: "clip", clip, index });
+  });
+  return rows;
+});
 
 const tabKeys = computed<Array<Scope | number>>(() => ["all", "fav", ...groups.value.map((g) => g.id)]);
 function cycleTab(dir: number) {
@@ -870,6 +913,7 @@ function onHidden() {
   // Reset while hidden so the next show doesn't open on the old page or search.
   page.value = "list";
   query.value = "";
+  kindFilter.value = "all";
   listScrolled.value = false;
   closeMenus();
   previewGeneration++;
@@ -1034,8 +1078,19 @@ onUnmounted(() => {
       <div class="search-area" :class="{ scrolled: listScrolled }">
         <div class="search">
           <ClipIcon name="search" />
-          <input ref="searchEl" v-model="query" :placeholder="preserveExplorerRename ? '重命名时请用鼠标选择记录' : '搜索文本…'" :disabled="preserveExplorerRename" spellcheck="false" />
+          <input ref="searchEl" v-model="query" :placeholder="preserveExplorerRename ? '重命名时请用鼠标选择记录' : '搜索文本或图片文件名…'" :disabled="preserveExplorerRename" spellcheck="false" />
           <button v-if="query" class="icon-btn clear" title="清除" @click="query = ''"><ClipIcon name="close" /></button>
+        </div>
+        <div class="kind-filters" role="toolbar" aria-label="类型筛选">
+          <button
+            v-for="opt in kindOptions"
+            :key="opt.id"
+            type="button"
+            class="kind-chip"
+            :class="{ active: kindFilter === opt.id }"
+            :aria-pressed="kindFilter === opt.id"
+            @click="kindFilter = opt.id"
+          >{{ opt.label }}</button>
         </div>
 
         <button v-if="paused" class="pause-banner" @click="api.toggleCapturePaused()">
@@ -1052,60 +1107,63 @@ onUnmounted(() => {
 
       <ul ref="listEl" class="list" @scroll="onScroll">
         <!-- Clips are replaced, never mutated, so a row only re-renders when its inputs change
-             instead of all of them on every selection move. -->
-        <li
-          v-for="(c, i) in visibleClips"
-          :key="c.id"
-          v-memo="[c, i, i === selected, multiSelect.ids.includes(c.id), scope, groupName(c.groupId), preserveExplorerRename]"
-          class="item"
-          :class="{ selected: i === selected, pinned: c.pinned, picked: multiSelect.ids.includes(c.id) }"
-          :title="itemHint(c, i)"
-          @mousemove="onItemHover(i, $event)"
-          @click.capture="dismissMenuBeforeItemClick"
-          @click="onItemClick(c, i, $event)"
-          @contextmenu="openClipMenu(c, $event)"
-        >
-          <div class="body" :class="{ 'image-body': c.kind === 'image' && c.thumb }">
-            <img v-if="c.kind === 'image' && c.thumb" class="thumb" :src="convertFileSrc(c.thumb)" :alt="c.source ? `${c.source} 的缩略图` : '剪贴板图片缩略图'" width="76" height="76" loading="lazy" decoding="async" draggable="false" />
-            <div v-if="c.kind === 'image' && c.thumb" class="image-summary">
-              <span class="image-name" :title="c.source || '剪贴板图片'">{{ c.source || '剪贴板图片' }}</span>
-              <span v-if="c.width && c.height" class="image-dimensions">{{ c.width }} × {{ c.height }}</span>
-            </div>
-            <div v-else-if="c.color" class="hex-preview">
-              <span class="hex-swatch" aria-hidden="true"><span :style="{ backgroundColor: c.color }"></span></span>
-              <span class="hex-value">{{ c.color }}</span>
-            </div>
-            <div v-else class="text">{{ c.preview }}<span v-if="c.truncated" class="more">…</span></div>
-            <div class="item-footer">
-              <div class="meta">
-                <span class="meta-time">{{ timeAgo(c.updatedAt) }}</span>
-                <span class="meta-dot" aria-hidden="true">·</span>
-                <span class="meta-type"><ClipIcon :name="c.kind === 'image' ? 'image' : c.color ? 'palette' : 'file-text'" class="tiny" />{{ c.kind === 'image' ? '图片' : c.color ? 'HEX 色值' : '文本' }}</span>
-                <span v-if="c.pinned" class="meta-flag pin-flag"><ClipIcon name="pin" class="tiny" />置顶</span>
-                <span v-if="scope !== 'group' && groupName(c.groupId)" class="meta-flag group-flag" :title="groupName(c.groupId) ?? ''"><ClipIcon name="folder" class="tiny" /><span class="group-label">{{ groupName(c.groupId) }}</span></span>
+             instead of all of them on every selection move. Date headings are scan-only. -->
+        <template v-for="row in listRows" :key="row.key">
+          <li v-if="row.kind === 'heading'" class="date-heading">{{ row.label }}</li>
+          <li
+            v-else
+            v-memo="[row.clip, row.index, row.index === selected, multiSelect.ids.includes(row.clip.id), scope, groupName(row.clip.groupId), preserveExplorerRename]"
+            class="item"
+            :class="{ selected: row.index === selected, pinned: row.clip.pinned, picked: multiSelect.ids.includes(row.clip.id) }"
+            :data-clip-index="row.index"
+            :title="itemHint(row.clip, row.index)"
+            @mousemove="onItemHover(row.index, $event)"
+            @click.capture="dismissMenuBeforeItemClick"
+            @click="onItemClick(row.clip, row.index, $event)"
+            @contextmenu="openClipMenu(row.clip, $event)"
+          >
+            <div class="body" :class="{ 'image-body': row.clip.kind === 'image' && row.clip.thumb }">
+              <img v-if="row.clip.kind === 'image' && row.clip.thumb" class="thumb" :src="convertFileSrc(row.clip.thumb)" :alt="row.clip.source ? `${row.clip.source} 的缩略图` : '剪贴板图片缩略图'" width="76" height="76" loading="lazy" decoding="async" draggable="false" />
+              <div v-if="row.clip.kind === 'image' && row.clip.thumb" class="image-summary">
+                <span class="image-name" :title="row.clip.source || '剪贴板图片'">{{ row.clip.source || '剪贴板图片' }}</span>
+                <span v-if="row.clip.width && row.clip.height" class="image-dimensions">{{ row.clip.width }} × {{ row.clip.height }}</span>
               </div>
-              <div class="ops">
-                <button class="icon-btn sm" :title="c.kind === 'image' ? '预览图片 (空格)' : '查看全文 / 编辑 (空格)'" @click.stop="openPreview(c)"><ClipIcon name="eye" /></button>
-                <button
-                  class="icon-btn sm star-op"
-                  :class="{ active: c.favorite }"
-                  :title="c.favorite ? `取消收藏 (${modShortcut('S')})` : `收藏 (${modShortcut('S')})`"
-                  :aria-label="c.favorite ? '取消收藏' : '收藏'"
-                  :aria-pressed="c.favorite"
-                  @click.stop="toggleFav(c)"
-                >
-                  <ClipIcon :name="c.favorite ? 'star-fill' : 'star'" />
-                </button>
-                <button class="icon-btn sm more-op" title="更多操作 · 也可右键条目" aria-label="更多操作" @click.stop="openClipMenu(c, $event)"><ClipIcon name="more" /></button>
+              <div v-else-if="row.clip.color" class="hex-preview">
+                <span class="hex-swatch" aria-hidden="true"><span :style="{ backgroundColor: row.clip.color }"></span></span>
+                <span class="hex-value">{{ row.clip.color }}</span>
+              </div>
+              <div v-else class="text">{{ row.clip.preview }}<span v-if="row.clip.truncated" class="more">…</span></div>
+              <div class="item-footer">
+                <div class="meta">
+                  <span class="meta-time">{{ timeAgo(row.clip.updatedAt) }}</span>
+                  <span class="meta-dot" aria-hidden="true">·</span>
+                  <span class="meta-type"><ClipIcon :name="row.clip.kind === 'image' ? 'image' : row.clip.color ? 'palette' : 'file-text'" class="tiny" />{{ row.clip.kind === 'image' ? '图片' : row.clip.color ? 'HEX 色值' : '文本' }}</span>
+                  <span v-if="row.clip.pinned" class="meta-flag pin-flag"><ClipIcon name="pin" class="tiny" />置顶</span>
+                  <span v-if="scope !== 'group' && groupName(row.clip.groupId)" class="meta-flag group-flag" :title="groupName(row.clip.groupId) ?? ''"><ClipIcon name="folder" class="tiny" /><span class="group-label">{{ groupName(row.clip.groupId) }}</span></span>
+                </div>
+                <div class="ops">
+                  <button class="icon-btn sm" :title="row.clip.kind === 'image' ? '预览图片 (空格)' : '查看全文 / 编辑 (空格)'" @click.stop="openPreview(row.clip)"><ClipIcon name="eye" /></button>
+                  <button
+                    class="icon-btn sm star-op"
+                    :class="{ active: row.clip.favorite }"
+                    :title="row.clip.favorite ? `取消收藏 (${modShortcut('S')})` : `收藏 (${modShortcut('S')})`"
+                    :aria-label="row.clip.favorite ? '取消收藏' : '收藏'"
+                    :aria-pressed="row.clip.favorite"
+                    @click.stop="toggleFav(row.clip)"
+                  >
+                    <ClipIcon :name="row.clip.favorite ? 'star-fill' : 'star'" />
+                  </button>
+                  <button class="icon-btn sm more-op" title="更多操作 · 也可右键条目" aria-label="更多操作" @click.stop="openClipMenu(row.clip, $event)"><ClipIcon name="more" /></button>
+                </div>
               </div>
             </div>
-          </div>
-        </li>
+          </li>
+        </template>
         <li v-if="!clips.length" class="empty">
           <ClipIcon :name="scope === 'fav' ? 'star' : scope === 'group' ? 'folder' : 'clipboard'" class="empty-icon" />
           <p>
             {{
-              query
+              query || kindFilter !== "all"
                 ? "没有匹配的内容"
                 : scope === "fav"
                   ? "还没有收藏，划到条目上点星标"
@@ -1359,6 +1417,27 @@ onUnmounted(() => {
   width: 24px;
   height: 24px;
 }
+.kind-filters {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+}
+.kind-chip {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.kind-chip:hover { background: var(--hover); color: var(--text); }
+.kind-chip.active {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+}
+.kind-chip.active:hover { background: var(--accent-soft); }
 .pause-banner,
 .notice-banner {
   display: flex;
@@ -1407,6 +1486,14 @@ onUnmounted(() => {
   padding: 6px 9px 56px;
   scroll-padding-bottom: 56px;
 }
+.date-heading {
+  padding: 8px 6px 4px;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.date-heading:first-child { padding-top: 2px; }
 .back-to-top {
   position: absolute;
   right: 18px;
