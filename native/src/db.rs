@@ -354,6 +354,7 @@ fn delete_where(
     Ok(files)
 }
 
+#[cfg(test)]
 pub fn list(conn: &Connection, scope: Scope, query: &str) -> rusqlite::Result<Vec<Clip>> {
     list_with_kind(conn, scope, query, KindFilter::All)
 }
