@@ -2294,28 +2294,32 @@ fn on_main_focus_changed(app: &AppHandle, focused: bool) {
         let pinned = app
             .try_state::<Core>()
             .is_some_and(|core| core.settings().keep_on_blur);
-        // The Accessibility guide stays up across System Settings. Cancelling the focus
-        // session here would forget the app a later paste still has to return to.
+        // The Accessibility guide stays open while System Settings is frontmost. Do not
+        // cancel the session, and do not follow that app: on macOS foreground_changed()
+        // rewrites the paste target even though it returns false. A later click must
+        // still paste into the application that was frontmost when the panel opened.
         #[cfg(target_os = "macos")]
-        let preserve_session = pinned || macos_onboarding::hold_open();
+        let follow_foreground = !macos_onboarding::hold_open();
         #[cfg(not(target_os = "macos"))]
-        let preserve_session = pinned;
-        if preserve_session {
-            if focus::foreground_changed() {
-                if let Some(window) = main_window(app) {
-                    if let Err(error) = window.set_focusable(false) {
-                        win::log_diagnostic(&format!("set-nonfocusable-failed {error}"));
-                        hide_main(app);
-                        return;
+        let follow_foreground = true;
+        if follow_foreground {
+            if pinned {
+                if focus::foreground_changed() {
+                    if let Some(window) = main_window(app) {
+                        if let Err(error) = window.set_focusable(false) {
+                            win::log_diagnostic(&format!("set-nonfocusable-failed {error}"));
+                            hide_main(app);
+                            return;
+                        }
+                        PRESERVE_EDITOR_MODE.store(true, Ordering::Relaxed);
+                        let _ = window.emit("rename-safe-mode-changed", true);
+                        watch_preserved_editor(app);
                     }
-                    PRESERVE_EDITOR_MODE.store(true, Ordering::Relaxed);
-                    let _ = window.emit("rename-safe-mode-changed", true);
-                    watch_preserved_editor(app);
+                    return;
                 }
-                return;
+            } else {
+                focus::cancel();
             }
-        } else {
-            focus::cancel();
         }
     }
     if !should_keep_open(app) {
