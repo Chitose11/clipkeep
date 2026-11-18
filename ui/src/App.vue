@@ -47,7 +47,7 @@ const groupInput = ref<HTMLInputElement | null>(null);
 const groupEditor = reactive({ open: false, mode: "create" as "create" | "rename", groupId: 0, name: "", error: "", busy: false, x: 0, y: 0 });
 const groupMenu = reactive({ open: false, groupId: 0, confirming: false, x: 0, y: 0 });
 const moveMenu = reactive({ open: false, clipId: 0, x: 0, y: 0 });
-const sendMenu = reactive({ open: false, clipId: 0, x: 0, y: 0 });
+const sendMenu = reactive({ open: false, clipId: 0, kind: "text" as Clip["kind"], x: 0, y: 0 });
 const clipMenu = reactive({ open: false, clipId: 0, x: 0, y: 0 });
 let menuGeneration = 0;
 let windowShown = false;
@@ -352,6 +352,7 @@ function openSendMenu(c: Clip, row: HTMLElement, focus: boolean) {
   closeSubmenus();
   const generation = menuGeneration;
   sendMenu.clipId = c.id;
+  sendMenu.kind = c.kind;
   lanPeers.value = [];
   sendLoading.value = true;
   sendError.value = "";
@@ -1347,7 +1348,7 @@ onUnmounted(() => {
       <button class="menu-row" @click="menuAction('preview')"><ClipIcon name="eye" /><span class="menu-text">{{ menuClip.kind === 'image' ? '预览' : '查看 / 编辑' }}</span><span class="menu-shortcut">空格</span></button>
       <button v-if="menuClip.kind === 'image'" class="menu-row" @click="menuAction('save')"><ClipIcon name="download" /><span class="menu-text">另存为文件</span></button>
       <div class="menu-divider"></div>
-      <button v-if="menuClip.kind === 'text'" class="menu-row" :class="{ open: openSubmenu === 'send' }" data-submenu="send" aria-haspopup="menu" :aria-expanded="openSubmenu === 'send'" @click="showSubmenu('send', $event.currentTarget as HTMLElement, true)"><ClipIcon name="send" /><span class="menu-text">发送到设备</span><ClipIcon name="chevron" class="menu-chevron" /></button>
+      <button v-if="menuClip.kind === 'text' || menuClip.kind === 'image'" class="menu-row" :class="{ open: openSubmenu === 'send' }" data-submenu="send" aria-haspopup="menu" :aria-expanded="openSubmenu === 'send'" @click="showSubmenu('send', $event.currentTarget as HTMLElement, true)"><ClipIcon name="send" /><span class="menu-text">发送到设备</span><ClipIcon name="chevron" class="menu-chevron" /></button>
       <button class="menu-row" :class="{ open: openSubmenu === 'move' }" data-submenu="move" aria-haspopup="menu" :aria-expanded="openSubmenu === 'move'" @click="showSubmenu('move', $event.currentTarget as HTMLElement, true)"><ClipIcon name="folder" /><span class="menu-text">移动到分组</span><ClipIcon name="chevron" class="menu-chevron" /></button>
       <div class="menu-divider"></div>
       <button class="menu-row" @click="menuAction('favorite')"><ClipIcon :name="menuClip.favorite ? 'star-fill' : 'star'" /><span class="menu-text">{{ menuClip.favorite ? '取消收藏' : '收藏' }}</span><span class="menu-shortcut">{{ modShortcut('S') }}</span></button>
@@ -1369,7 +1370,7 @@ onUnmounted(() => {
       </template>
     </div>
     <div v-if="sendMenu.open" class="menu menu-surface send-menu" :style="{ left: sendMenu.x + 'px', top: sendMenu.y + 'px' }" role="group" aria-label="发送到设备" tabindex="-1" @click.stop @mouseenter="keepSubmenu">
-      <div class="menu-label">发送文本到</div>
+      <div class="menu-label">{{ sendMenu.kind === 'image' ? '发送图片到' : '发送文本到' }}</div>
       <div v-if="sendLoading" class="send-menu-message" role="status">正在读取设备…</div>
       <template v-else>
         <button v-for="peer in lanPeers" :key="peer.address" class="menu-row" :disabled="sendBusy" :title="`${peer.name} · ${peer.address}`" :aria-label="`发送到 ${peer.name}（${peer.address}）`" @click="sendTo(peer)"><ClipIcon name="send" /><span class="menu-text">{{ peer.name }}</span></button>

@@ -73,6 +73,8 @@ export interface LanState {
   receiveEnabled: boolean;
   localCodes: { address: string; code: string }[];
   peers: LanPeer[];
+  /** PNG payload cap, in bytes. */
+  maxImageBytes: number;
 }
 
 export type Scope = "all" | "fav" | "group";

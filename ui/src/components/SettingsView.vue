@@ -21,6 +21,10 @@ const s = computed(() => view.value?.settings);
 const autostart = ref<boolean | null>(null);
 const accessibility = ref<MacosSetupState | null>(null);
 const lan = ref<LanState | null>(null);
+const lanImageLimit = computed(() => {
+  const bytes = lan.value?.maxImageBytes ?? 16 * 1024 * 1024;
+  return `${Math.round(bytes / (1024 * 1024))} MB`;
+});
 const peerName = ref("");
 const peerCode = ref("");
 const lanBusy = ref(false);
@@ -458,8 +462,8 @@ onUnmounted(() => {
       <div v-if="lan" class="card">
         <label class="row">
           <div class="label">
-            <div class="name">接收其他设备的文本</div>
-            <div class="desc">默认关闭。开启后，同一局域网内持有配对码的设备可手动发送文本，收到后只存入本机历史，不覆盖当前剪贴板。</div>
+            <div class="name">接收其他设备的文本和图片</div>
+            <div class="desc">默认关闭。开启后，同一局域网内持有配对码的设备可手动发送文本和已记录的图片，收到后只存入本机历史，不覆盖当前剪贴板。图片不超过 {{ lanImageLimit }}；只支持文本的旧版本会拒绝图片。</div>
           </div>
           <input type="checkbox" class="switch" :checked="lan.receiveEnabled" :disabled="lanBusy" @change="toggleLanReceive" />
         </label>
@@ -587,7 +591,7 @@ onUnmounted(() => {
         </template>
       </div>
 
-      <p class="foot">clipkeep · 数据默认只保存在本机 · 局域网文本传送需手动启用</p>
+      <p class="foot">clipkeep · 数据默认只保存在本机 · 局域网传送需手动启用</p>
     </div>
   </div>
 </template>
