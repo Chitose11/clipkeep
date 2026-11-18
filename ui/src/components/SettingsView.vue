@@ -4,6 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api, type LanState, type Settings, type SettingsView, type StorageUsage, type Theme } from "../api";
 import { formatSize, useUpdate } from "../update";
 import ClipIcon from "./ClipIcon.vue";
+import { modShortcut, shiftShortcut } from "../platform";
 
 defineEmits<{ back: [] }>();
 
@@ -471,8 +472,8 @@ onUnmounted(() => {
           </select>
         </div>
         <p class="hint">
-          <kbd>↑</kbd><kbd>↓</kbd> 选择 · <kbd>Enter</kbd> 粘贴 · <kbd>Shift+Enter</kbd> 仅复制 · <kbd>Ctrl+1–9</kbd> 快速粘贴 ·
-          <kbd>Ctrl+P</kbd> 置顶 · <kbd>Ctrl+S</kbd> 收藏 · <kbd>Ctrl+D</kbd> 删除 · <kbd>Tab</kbd> 切分组 · <kbd>Esc</kbd> 关闭
+          <kbd>↑</kbd><kbd>↓</kbd> 选择 · <kbd>Enter</kbd> 粘贴 · <kbd>{{ shiftShortcut("Enter") }}</kbd> 仅复制 · <kbd>{{ modShortcut("1–9") }}</kbd> 快速粘贴 ·
+          <kbd>{{ modShortcut("P") }}</kbd> 置顶 · <kbd>{{ modShortcut("S") }}</kbd> 收藏 · <kbd>{{ modShortcut("D") }}</kbd> 删除 · <kbd>Tab</kbd> 切分组 · <kbd>Esc</kbd> 关闭
         </p>
       </div>
 

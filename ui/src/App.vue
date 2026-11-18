@@ -6,6 +6,7 @@ import { api, applyTheme, loadUi, saveUi, type Clip, type Group, type LanPeer, t
 import SettingsView from "./components/SettingsView.vue";
 import ClipIcon from "./components/ClipIcon.vue";
 import { useUpdate } from "./update";
+import { modShortcut, shiftShortcut } from "./platform";
 
 const page = ref<"list" | "settings">("list");
 const { newer: newerVersion } = useUpdate();
@@ -784,7 +785,7 @@ function itemHint(c: Clip, index: number) {
     `记录于 ${new Date(c.updatedAt).toLocaleString("zh-CN")}`,
     c.kind === "image" ? `${c.width}×${c.height}` : "",
     c.source ? `来自 ${c.source}` : "",
-    index < 9 && !preserveExplorerRename.value ? `Ctrl+${index + 1} 快速粘贴` : "",
+    index < 9 && !preserveExplorerRename.value ? `${modShortcut(String(index + 1))} 快速粘贴` : "",
   ].filter(Boolean).join(" · ");
 }
 
@@ -959,7 +960,7 @@ onUnmounted(() => {
                 <button
                   class="icon-btn sm star-op"
                   :class="{ active: c.favorite }"
-                  :title="c.favorite ? '取消收藏 (Ctrl+S)' : '收藏 (Ctrl+S)'"
+                  :title="c.favorite ? `取消收藏 (${modShortcut('S')})` : `收藏 (${modShortcut('S')})`"
                   :aria-label="c.favorite ? '取消收藏' : '收藏'"
                   :aria-pressed="c.favorite"
                   @click.stop="toggleFav(c)"
@@ -1012,16 +1013,16 @@ onUnmounted(() => {
     </div>
 
     <div v-if="clipMenu.open && menuClip" class="menu menu-surface clip-menu" :style="{ left: clipMenu.x + 'px', top: clipMenu.y + 'px' }" @click.stop @mouseover="onClipMenuHover">
-      <button class="menu-row" @click="menuAction('copy')"><ClipIcon name="copy" /><span class="menu-text">仅复制</span><span class="menu-shortcut">Shift+Enter</span></button>
+      <button class="menu-row" @click="menuAction('copy')"><ClipIcon name="copy" /><span class="menu-text">仅复制</span><span class="menu-shortcut">{{ shiftShortcut('Enter') }}</span></button>
       <button v-if="menuClip.kind === 'text'" class="menu-row" @click="menuAction('preview')"><ClipIcon name="eye" /><span class="menu-text">查看 / 编辑</span></button>
       <div class="menu-divider"></div>
       <button v-if="menuClip.kind === 'text'" class="menu-row" :class="{ open: openSubmenu === 'send' }" data-submenu="send" aria-haspopup="menu" :aria-expanded="openSubmenu === 'send'" @click="showSubmenu('send', $event.currentTarget as HTMLElement, true)"><ClipIcon name="send" /><span class="menu-text">发送到设备</span><ClipIcon name="chevron" class="menu-chevron" /></button>
       <button class="menu-row" :class="{ open: openSubmenu === 'move' }" data-submenu="move" aria-haspopup="menu" :aria-expanded="openSubmenu === 'move'" @click="showSubmenu('move', $event.currentTarget as HTMLElement, true)"><ClipIcon name="folder" /><span class="menu-text">移动到分组</span><ClipIcon name="chevron" class="menu-chevron" /></button>
       <div class="menu-divider"></div>
-      <button class="menu-row" @click="menuAction('favorite')"><ClipIcon :name="menuClip.favorite ? 'star-fill' : 'star'" /><span class="menu-text">{{ menuClip.favorite ? '取消收藏' : '收藏' }}</span></button>
-      <button class="menu-row" @click="menuAction('pin')"><ClipIcon name="pin" /><span class="menu-text">{{ menuClip.pinned ? '取消置顶' : '置顶' }}</span></button>
+      <button class="menu-row" @click="menuAction('favorite')"><ClipIcon :name="menuClip.favorite ? 'star-fill' : 'star'" /><span class="menu-text">{{ menuClip.favorite ? '取消收藏' : '收藏' }}</span><span class="menu-shortcut">{{ modShortcut('S') }}</span></button>
+      <button class="menu-row" @click="menuAction('pin')"><ClipIcon name="pin" /><span class="menu-text">{{ menuClip.pinned ? '取消置顶' : '置顶' }}</span><span class="menu-shortcut">{{ modShortcut('P') }}</span></button>
       <div class="menu-divider"></div>
-      <button class="menu-row danger" @click="menuAction('delete')"><ClipIcon name="trash" /><span class="menu-text">删除条目</span></button>
+      <button class="menu-row danger" @click="menuAction('delete')"><ClipIcon name="trash" /><span class="menu-text">删除条目</span><span class="menu-shortcut">{{ modShortcut('D') }}</span></button>
     </div>
     <div v-if="moveMenu.open" class="menu menu-surface move-menu" :style="{ left: moveMenu.x + 'px', top: moveMenu.y + 'px' }" @click.stop @mouseenter="keepSubmenu">
       <div class="menu-label">移动到</div>
@@ -1088,7 +1089,7 @@ onUnmounted(() => {
       <textarea v-else-if="editing" ref="editorEl" v-model="draftText" class="preview-editor" spellcheck="false"></textarea>
       <pre v-else class="preview-content">{{ fullText }}</pre>
       <footer class="preview-foot">
-        <span>{{ editing ? 'Ctrl+Enter 保存 · Esc 取消' : '可选择并复制任意段落' }}</span>
+        <span>{{ editing ? `${modShortcut('Enter')} 保存 · Esc 取消` : '可选择并复制任意段落' }}</span>
         <button v-if="editing" class="preview-action" :disabled="previewBusy" @click="savePreview">保存</button>
         <button v-else class="preview-action" :disabled="previewBusy || !!previewError" @click="startEditing">编辑</button>
       </footer>
