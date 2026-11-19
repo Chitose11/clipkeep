@@ -745,10 +745,11 @@ fn macos_setup_state(core: State<Core>) -> MacosSetupState {
     {
         let trusted = win::accessibility_trusted();
         // Granted permission forgets a postponement, so revoking it can show the guide again.
-        if trusted && macos_onboarding::dismissed(&core.data_dir) {
-            if let Err(error) = macos_onboarding::clear_dismissal(&core.data_dir) {
-                eprintln!("clearing accessibility guide postponement failed: {error}");
-            }
+        if trusted
+            && macos_onboarding::dismissed(&core.data_dir)
+            && let Err(error) = macos_onboarding::clear_dismissal(&core.data_dir)
+        {
+            eprintln!("clearing accessibility guide postponement failed: {error}");
         }
         let dismissed = macos_onboarding::dismissed(&core.data_dir);
         MacosSetupState {
@@ -2032,12 +2033,18 @@ fn show_main(app: &AppHandle) {
     if recover::blocks_show(app) {
         return;
     }
-    // Keep the first-run guide visible while the system consent dialog is open.
-    #[cfg(target_os = "macos")]
-    if macos_accessibility_guide_pending(app) {
-        macos_onboarding::set_hold(true);
-    }
     win::log_diagnostic("show-main-begin");
+    #[cfg(target_os = "macos")]
+    let preserve_editor = {
+        // Re-activating a panel with an open guide must keep its original paste target.
+        let resuming_guide =
+            WINDOW_VISIBLE.load(Ordering::Relaxed) && macos_onboarding::hold_open();
+        if macos_accessibility_guide_pending(app) {
+            macos_onboarding::set_hold(true);
+        }
+        !resuming_guide && focus::begin_session()
+    };
+    #[cfg(windows)]
     let preserve_editor = focus::begin_session();
     hide_tray_menu_window(app);
     FOCUS_EPOCH.fetch_add(1, Ordering::Relaxed);
