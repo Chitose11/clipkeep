@@ -89,6 +89,7 @@ const draftText = ref("");
 const editing = ref(false);
 const previewBusy = ref(false);
 const previewError = ref("");
+const imageSaveError = ref("");
 const editorEl = ref<HTMLTextAreaElement | null>(null);
 let previewGeneration = 0;
 // Multi-select is an interaction State (which rows are checked). It is distinct from
@@ -223,6 +224,7 @@ function onItemClick(c: Clip, index: number, e: MouseEvent) {
 async function openPreview(c: Clip) {
   const generation = ++previewGeneration;
   previewClip.value = c;
+  imageSaveError.value = "";
   fullText.value = "";
   draftText.value = "";
   previewError.value = "";
@@ -258,13 +260,13 @@ async function saveClipAsFile(c?: Clip) {
   if (!c || c.kind !== "image" || previewBusy.value) return;
   const generation = previewGeneration;
   previewBusy.value = true;
-  previewError.value = "";
+  imageSaveError.value = "";
   try {
     const path = await api.saveClipImage(c.id);
     if (generation !== previewGeneration && previewClip.value) return;
     if (path) flash(`已保存到 ${path}`);
   } catch (e) {
-    if (previewClip.value && generation === previewGeneration) previewError.value = String(e);
+    if (previewClip.value && generation === previewGeneration) imageSaveError.value = String(e);
     else flash(`保存失败：${e}`);
   } finally {
     if (generation === previewGeneration) previewBusy.value = false;
@@ -1431,6 +1433,7 @@ onUnmounted(() => {
         <button class="icon-btn" :title="editing ? '取消编辑' : '关闭'" @click="closePreview"><ClipIcon name="close" /></button>
       </header>
       <div v-if="previewError" class="preview-error">{{ previewError }}</div>
+      <div v-if="imageSaveError" class="preview-error" role="alert">保存失败：{{ imageSaveError }}</div>
       <div v-if="previewClip.kind === 'image'" class="preview-image-wrap">
         <img v-if="previewImageSrc && !previewError" class="preview-image" :src="previewImageSrc" :alt="previewClip.source || '剪贴板图片'" draggable="false" />
       </div>
