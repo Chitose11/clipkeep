@@ -745,21 +745,25 @@ async fn copy_clip(app: AppHandle, id: i64) -> CmdResult<()> {
 /// same call a single text paste makes, then one paste key is injected.
 #[tauri::command]
 async fn paste_merged(app: AppHandle, ids: Vec<i64>) -> CmdResult<()> {
-    let core = app.state::<Core>();
-    let pinned = core.settings().keep_on_blur;
-    let text = {
-        let conn = core.conn()?;
-        let mut loaded = Vec::with_capacity(ids.len());
-        for id in &ids {
-            loaded.push(db::get(&conn, *id).map_err(to_err)?);
-        }
-        let rows = loaded.iter().map(|row| {
-            row.as_ref()
-                .map(|(kind, content)| (kind.as_str(), content.as_str()))
-        });
-        merge::merge_loaded(rows, merge::SEPARATOR).map_err(|error| error.message().to_string())?
+    // `State` has no `Drop`, so the DB guard ends with this block instead of `drop`.
+    let (text, pinned) = {
+        let core = app.state::<Core>();
+        let pinned = core.settings().keep_on_blur;
+        let text = {
+            let conn = core.conn()?;
+            let mut loaded = Vec::with_capacity(ids.len());
+            for id in &ids {
+                loaded.push(db::get(&conn, *id).map_err(to_err)?);
+            }
+            let rows = loaded.iter().map(|row| {
+                row.as_ref()
+                    .map(|(kind, content)| (kind.as_str(), content.as_str()))
+            });
+            merge::merge_loaded(rows, merge::SEPARATOR)
+                .map_err(|error| error.message().to_string())?
+        };
+        (text, pinned)
     };
-    drop(core);
     let action = focus::claim()?;
     tauri::async_runtime::spawn_blocking(move || {
         let result = (|| {
