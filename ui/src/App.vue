@@ -9,6 +9,7 @@ import ClipIcon from "./components/ClipIcon.vue";
 import { formatSize, useUpdate } from "./update";
 import { hasModKey, modShortcut, shiftShortcut } from "./platform";
 import { clearSelection, reconcileSelection, keyboardSelectionFocus, hoverSelectionFocus, toggleSelection, rangeSelection } from "./selection";
+import { planMergePaste } from "./mergePaste";
 
 const page = ref<"list" | "settings">("list");
 const { newer: newerVersion } = useUpdate();
@@ -93,8 +94,8 @@ const imageSaveError = ref("");
 const editorEl = ref<HTMLTextAreaElement | null>(null);
 let previewGeneration = 0;
 // Multi-select is an interaction State (which rows are checked). It is distinct from
-// `selected` (the focused/current row) and from any Status. It is a prerequisite for a
-// later merge-paste feature; this change only implements the selection itself.
+// `selected` (the focused/current row) and from any Status. `ids` keeps selection order
+// for merge paste: Ctrl/Cmd-click appends, Shift-click appends the new range top to bottom.
 const multiSelect = reactive({
   ids: [] as number[],
   anchor: null as number | null,
@@ -182,6 +183,32 @@ async function transfer(c: Clip | undefined, paste: boolean) {
 
 const paste = (c?: Clip) => transfer(c, true);
 const copyOnly = (c?: Clip) => transfer(c, false);
+
+const mergePasteTitle = computed(() => {
+  const plan = planMergePaste(multiSelect.ids, clips.value);
+  const hint = plan.ok ? "按换行合并选中的文本并粘贴" : plan.message;
+  return `${hint}（${modShortcut("Enter")}）`;
+});
+
+async function pasteMerged() {
+  if (transferBusy.value) return;
+  const plan = planMergePaste(multiSelect.ids, clips.value);
+  if (!plan.ok) {
+    flash(plan.message);
+    return;
+  }
+  const generation = ++transferGeneration;
+  transferBusy.value = true;
+  try {
+    await api.pasteMerged(plan.ids);
+  } catch (error) {
+    const explained = await explainAccessibilityIfNeeded();
+    if (!explained && generation === transferGeneration) reportFocusError(error);
+  } finally {
+    if (generation === transferGeneration) transferBusy.value = false;
+  }
+}
+
 const remove = (c?: Clip) => c && api.deleteClip(c.id);
 const toggleFav = (c?: Clip) => c && api.toggleFavorite(c.id);
 const togglePin = (c?: Clip) => c && api.togglePinned(c.id);
@@ -711,6 +738,11 @@ async function moveTo(groupId: number | null) {
   }
 }
 
+function eventTargetElement(target: EventTarget | null): { closest(selector: string): unknown } | null {
+  if (typeof target !== "object" || target === null || !("closest" in target) || typeof target.closest !== "function") return null;
+  return target as { closest(selector: string): unknown };
+}
+
 function move(delta: number) {
   if (!clips.value.length) return;
   selected.value = Math.min(clips.value.length - 1, Math.max(0, selected.value + delta));
@@ -843,6 +875,7 @@ function onKey(e: KeyboardEvent) {
   const current = clips.value[selected.value];
   const ctrl = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
+  const inMultiBar = !!eventTargetElement(e.target)?.closest(".multi-bar");
   let handled = true;
   if (e.key === "Escape") {
     if (inMultiSelect.value) clearMultiSelect();
@@ -853,6 +886,10 @@ function onKey(e: KeyboardEvent) {
   else if (e.key === "ArrowUp") move(-1);
   else if (e.key === "PageDown") move(8);
   else if (e.key === "PageUp") move(-8);
+  // Ctrl/Cmd+Enter merges. Plain Enter still pastes the focused row. The preview
+  // editor's Ctrl/Cmd+Enter returns earlier and still saves.
+  else if (e.key === "Enter" && !e.shiftKey && ctrl && inMultiSelect.value) pasteMerged();
+  else if (inMultiBar && !e.shiftKey && !ctrl && (e.key === "Enter" || e.key === " ")) handled = false;
   else if (e.key === "Enter") e.shiftKey ? copyOnly(current) : paste(current);
   else if (e.key === " ") {
     const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
@@ -1245,8 +1282,9 @@ onUnmounted(() => {
         <div v-if="preserveExplorerRename" class="notice-banner" role="status">资源管理器正在重命名 · 用鼠标选择记录，或再次按快捷键收起</div>
         <div v-else-if="notice" class="notice-banner" role="status">{{ notice }}</div>
         <div v-else-if="transferBusy" class="notice-banner" role="status">正在准备内容…</div>
-        <div v-if="inMultiSelect" class="multi-bar" role="status">
-          <span>已选择 {{ multiSelect.ids.length }} 项</span>
+        <div v-if="inMultiSelect" class="multi-bar">
+          <span role="status">已选择 {{ multiSelect.ids.length }} 项</span>
+          <button type="button" class="multi-bar-paste" :disabled="transferBusy" :title="mergePasteTitle" @click="pasteMerged">合并粘贴</button>
           <button type="button" class="multi-bar-clear" @click="clearMultiSelect">取消选择</button>
         </div>
       </div>
@@ -1628,13 +1666,17 @@ onUnmounted(() => {
   font-weight: 600;
 }
 .multi-bar span { flex: 1; }
+.multi-bar-paste,
 .multi-bar-clear {
   padding: 2px 8px;
   border-radius: var(--r-sm);
   color: var(--accent);
   font-weight: 600;
 }
+.multi-bar-paste { background: var(--surface); }
+.multi-bar-paste:hover { background: var(--elevated); }
 .multi-bar-clear:hover { background: var(--surface); }
+.multi-bar-paste:disabled { opacity: 0.55; }
 
 .list {
   flex: 1;

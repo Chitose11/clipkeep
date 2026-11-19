@@ -99,4 +99,7 @@ test('UI wires events, cancel, reconciliation and query reset', () => {
   assert.match(app, /reconcileSelection\(multiSelect, rows, rows\[selected.value\]\)/);
   assert.match(app, /watch\(\[scope, activeGroup, kindFilter\], \(\) => \{\s*clearSelection\(multiSelect\)/);
   assert.match(app, /watch\(query, \(\) => \{\s*clearSelection\(multiSelect\)/);
+  assert.match(app, /class="multi-bar-paste"/);
+  assert.match(app, /@click="pasteMerged"/);
+  assert.match(app, /取消选择/);
 });

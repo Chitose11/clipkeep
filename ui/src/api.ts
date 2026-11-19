@@ -109,6 +109,7 @@ export const api = {
   reorderGroups: (ids: number[]) => invoke<void>("reorder_groups", { ids }),
   pasteClip: (id: number) => invoke<void>("paste_clip", { id }),
   copyClip: (id: number) => invoke<void>("copy_clip", { id }),
+  pasteMerged: (ids: number[]) => invoke<void>("paste_merged", { ids }),
   hideWindow: () => invoke<void>("hide_window"),
   getRenameSafeMode: () => invoke<boolean>("get_rename_safe_mode"),
   startDrag: () => invoke<void>("start_drag"),
