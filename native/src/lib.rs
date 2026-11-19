@@ -9,6 +9,7 @@ mod focus;
 mod focus;
 mod images;
 mod lan;
+mod merge;
 mod settings;
 mod update;
 
@@ -737,6 +738,46 @@ async fn paste_clip(app: AppHandle, id: i64) -> CmdResult<()> {
 #[tauri::command]
 async fn copy_clip(app: AppHandle, id: i64) -> CmdResult<()> {
     transfer_clip(app, id, false).await
+}
+
+/// Paste every selected text clip as one string. Ids stay in the order the panel
+/// sent (multi-select order). The clipboard write is `clipboard::write_text`, the
+/// same call a single text paste makes, then one paste key is injected.
+#[tauri::command]
+async fn paste_merged(app: AppHandle, ids: Vec<i64>) -> CmdResult<()> {
+    // `State` has no `Drop`, so the DB guard ends with this block instead of `drop`.
+    let (text, pinned) = {
+        let core = app.state::<Core>();
+        let pinned = core.settings().keep_on_blur;
+        let text = {
+            let conn = core.conn()?;
+            let mut loaded = Vec::with_capacity(ids.len());
+            for id in &ids {
+                loaded.push(db::get(&conn, *id).map_err(to_err)?);
+            }
+            let rows = loaded.iter().map(|row| {
+                row.as_ref()
+                    .map(|(kind, content)| (kind.as_str(), content.as_str()))
+            });
+            merge::merge_loaded(rows, merge::SEPARATOR)
+                .map_err(|error| error.message().to_string())?
+        };
+        (text, pinned)
+    };
+    let action = focus::claim()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| {
+            if !focus::current(action) {
+                return Err(focus::CANCELLED.into());
+            }
+            clipboard::write_text(&text).map_err(to_err)?;
+            return_to_input(&app, action, true, pinned)
+        })();
+        focus::finish(action);
+        result
+    })
+    .await
+    .map_err(to_err)?
 }
 
 #[tauri::command]
@@ -2681,6 +2722,7 @@ pub fn run() {
             reorder_groups,
             paste_clip,
             copy_clip,
+            paste_merged,
             hide_window,
             get_rename_safe_mode,
             open_release_page,
